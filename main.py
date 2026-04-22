@@ -184,7 +184,19 @@ def process_audio(audio_path, text_path, output_dir, base_name):
 
     # Получаем пословные временные метки от Whisper
     # fp16=False предотвращает предупреждения на процессорах без GPU
-    result = model.transcribe(audio_path, word_timestamps=True, fp16=False)
+    result = model.transcribe(
+        audio_path,
+        word_timestamps=True,
+        fp16=False,  # на Apple Silicon fp16 через MPS нестабилен
+        language="en",  # явно — убирает детекцию языка
+        beam_size=5,
+        best_of=5,
+        temperature=0.0,  # нейронка чистая → детерминизм лучше
+        condition_on_previous_text=False,  # критично для длинных записей
+        no_speech_threshold=0.3,  # нейронка не делает пауз-шумов → можно снизить
+        compression_ratio_threshold=2.4,
+        initial_prompt="The following is a clearly spoken voice acting performance."
+    )
 
     # Собираем все распознанные слова в один список
     all_audio_words = []
