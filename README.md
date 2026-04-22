@@ -70,6 +70,20 @@ For each actor folder:
 ### Stage 3 — `distribute_cuts.py`
 Moves each `cut/<Actor>/` folder's contents into `<Actor>/cut/`, then cleans up the empty top-level `cut/` tree. Existing files are never overwritten — collisions are reported.
 
+### Stage 4 — `order_cuts.py`
+Re-reads the master screenplay line by line and, for each dialogue line, locates the matching cut in `<Actor>/cut/` (by counting how many times that actor has spoken so far). Copies every cut into a single flat `final/` folder, renamed with a global index prefix so files sort in screenplay playback order:
+
+```
+final/
+├── 001_Blueberry_001.mp3      ← Blueberry: "why is the gc spamming..."
+├── 002_Hawk_001.mp3           ← Hawk: "nobody was talking to you"
+├── 003_Blueberry_002.mp3      ← Blueberry: "and yet here you are responding..."
+├── 004_Mia_001.mp3
+└── ...
+```
+
+The leading `001`, `002`, `003` = position in the master screenplay. The trailing `_001`, `_002` = that actor's Nth line (traceable back to `<Actor>/cut/<Actor>_NNN.mp3`).
+
 ### Final layout
 
 ```
@@ -87,7 +101,12 @@ script/
 │   ├── Hawk.txt
 │   └── cut/
 │       └── ...
-└── ...
+├── ...
+└── final/                  (stage 4 — all cuts ordered by master screenplay)
+    ├── 001_Blueberry_001.mp3
+    ├── 002_Hawk_001.mp3
+    ├── 003_Blueberry_002.mp3
+    └── ...
 ```
 
 ---
@@ -100,6 +119,7 @@ script/
 | `split_by_actors.py` | Stage 1 — splits master screenplay into per-actor `.txt` files. |
 | `main.py` | Stage 2 — Whisper transcription + audio slicing per actor. |
 | `distribute_cuts.py` | Stage 3 — moves cuts into each actor's folder. |
+| `order_cuts.py` | Stage 4 — collects all cuts into `final/` in master-screenplay order. |
 | `split_text.py` | Auxiliary — older character-splitter that writes to `characters_lines/`. Not used by `script.py`. |
 | `assemble_scene.py` | Auxiliary — joins per-actor cuts back into a single scene audio based on a screenplay. Run standalone. |
 
