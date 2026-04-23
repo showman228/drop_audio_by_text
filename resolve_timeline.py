@@ -2,48 +2,48 @@
 resolve_timeline.py
 ===================
 
-Автоматизация для DaVinci Resolve Studio 18.1+:
-  1. Подключается к активному проекту.
-  2. Находит папку `final/` рядом со скриптом.
-  3. Импортирует все аудио из неё в Media Pool.
-  4. Создаёт новый пустой таймлайн.
-  5. Раскладывает клипы «лесенкой» — один префикс имени = одна аудиодорожка,
-     все клипы встык по времени.
+Сборка таймлайна из аудио, которое УЖЕ лежит в Media Pool DaVinci Resolve.
 
-Запускать извне Resolve (через терминал) или из Workspace → Console → Py3.
-См. README_RESOLVE.md для настройки окружения.
+Скрипт не ходит в файловую систему — просто перебирает клипы в медиатеке,
+создаёт новый пустой таймлайн и раскладывает аудио встык, один «префикс»
+имени = одна аудиодорожка.
+
+Запуск:
+  1) Изнутри Resolve — Workspace → Console → вкладка Py3:
+       вставить весь файл целиком и Enter.
+  2) Из терминала с настроенными RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB /
+     PYTHONPATH:  python3 resolve_timeline.py
+
+Перед запуском: импортируйте нужные аудиофайлы в Media Pool вручную
+(File → Import → Media или drag-and-drop).
 """
 
-import os
-import sys
 
 # ============================================================
-# КОНФИГУРАЦИЯ
+# НАСТРОЙКИ
 # ============================================================
 
-FINAL_FOLDER_NAME = "final"        # имя папки с аудио рядом со скриптом
-TIMELINE_NAME     = "Assembled Scene"  # имя создаваемого таймлайна
-AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".aif", ".aiff", ".flac", ".ogg")
+# Имя бина, откуда брать клипы. Пустая строка = весь Media Pool (рекурсивно).
+# Пример: SOURCE_BIN_NAME = "final"  — если вы сложили всё в бин «final».
+SOURCE_BIN_NAME = ""
+
+TIMELINE_NAME = "Assembled Scene"
 
 
-def extract_prefix(filename: str) -> str:
+def extract_prefix(filename):
     """
-    Возвращает «префикс» — ключ для группировки клипов по дорожкам.
-    Один префикс = одна аудиодорожка.
+    Ключ группировки клипов по дорожкам: один префикс = одна дорожка.
+    По умолчанию — ВТОРАЯ секция через «_» (для файлов вида
+    001_Blueberry_001.mp3 → "Blueberry").
 
-    По умолчанию: ВТОРАЯ секция имени через «_». Это удобно для файлов
-    из нашего конвейера вида `001_Blueberry_001.mp3` → "Blueberry"
-    (один актёр = одна дорожка).
-
-    Если вам нужен другой формат — просто перепишите тело функции.
-    Примеры альтернатив:
+    Альтернативы:
         # до первого подчёркивания:
-        return os.path.splitext(filename)[0].split("_", 1)[0]
-
-        # первые 3 символа имени (без расширения):
-        return os.path.splitext(filename)[0][:3]
+        return filename.rsplit(".", 1)[0].split("_", 1)[0]
+        # первые 3 символа:
+        return filename.rsplit(".", 1)[0][:3]
     """
-    base = os.path.splitext(filename)[0]
+    # Убираем расширение, если оно есть
+    base = filename.rsplit(".", 1)[0] if "." in filename else filename
     parts = base.split("_")
     if len(parts) >= 2:
         return parts[1]
@@ -54,184 +54,194 @@ def extract_prefix(filename: str) -> str:
 # ПОДКЛЮЧЕНИЕ К RESOLVE
 # ============================================================
 
-def get_resolve():
-    """Подключается к запущенному Resolve Studio."""
+def _get_resolve():
+    """
+    В консоли Py3 объект `resolve` уже в глобалах — берём его.
+    Иначе подключаемся через DaVinciResolveScript (внешний запуск).
+    """
+    try:
+        return resolve  # type: ignore  # noqa: F821
+    except NameError:
+        pass
+
     try:
         import DaVinciResolveScript as dvr_script
     except ImportError:
-        sys.exit(
-            "[!] Не найден модуль DaVinciResolveScript.\n"
-            "    Настройте переменные окружения RESOLVE_SCRIPT_API / "
-            "RESOLVE_SCRIPT_LIB / PYTHONPATH.\n"
-            "    Подробности — в README_RESOLVE.md."
-        )
+        print("[!] Не найден модуль DaVinciResolveScript.")
+        print("    Для запуска извне Resolve нужны RESOLVE_SCRIPT_API /")
+        print("    RESOLVE_SCRIPT_LIB / PYTHONPATH. См. README_RESOLVE.md.")
+        return None
 
-    resolve = dvr_script.scriptapp("Resolve")
-    if not resolve:
-        sys.exit(
-            "[!] DaVinci Resolve не отвечает. Убедитесь, что:\n"
-            "     - запущена версия Studio (не бесплатная);\n"
-            "     - External scripting use включён (Preferences → System → General)."
-        )
-    return resolve
+    r = dvr_script.scriptapp("Resolve")
+    if not r:
+        print("[!] DaVinci Resolve не отвечает. Запустите Studio и откройте проект.")
+    return r
 
 
 # ============================================================
-# ПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# РАБОТА С MEDIA POOL
 # ============================================================
 
-def collect_audio_files(folder: str):
-    """Возвращает отсортированный список путей к аудиофайлам из folder."""
-    files = sorted(
-        os.path.join(folder, f)
-        for f in os.listdir(folder)
-        if f.lower().endswith(AUDIO_EXTS)
-        and os.path.isfile(os.path.join(folder, f))
-    )
-    return files
+def _find_bin(folder, name):
+    """Рекурсивно ищет подпапку по имени (без учёта регистра)."""
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+    if (folder.GetName() or "").lower() == target:
+        return folder
+    for sub in folder.GetSubFolderList() or []:
+        found = _find_bin(sub, name)
+        if found:
+            return found
+    return None
 
 
-def ensure_audio_tracks(timeline, needed: int):
-    """Добавляет аудиодорожки, пока их число не достигнет `needed`."""
+def _collect_audio_clips(media_pool, bin_name=""):
+    """
+    Собирает все чисто-аудио-клипы из Media Pool.
+    Если bin_name задан — только из этой папки и её подпапок; иначе — из всей медиатеки.
+    Результат отсортирован по имени (что совпадает со сценарной последовательностью
+    для файлов вида 001_<Actor>_NNN.mp3).
+    """
+    root = media_pool.GetRootFolder()
+    if not root:
+        print("[!] Media Pool пуст — нет корневой папки.")
+        return []
+
+    start = root
+    if bin_name:
+        found = _find_bin(root, bin_name)
+        if found:
+            start = found
+        else:
+            print(f"[!] Не найден бин «{bin_name}». Использую корень Media Pool.")
+
+    collected = []
+
+    def walk(folder):
+        for clip in folder.GetClipList() or []:
+            clip_type = clip.GetClipProperty("Type") or ""
+            # Берём только чистое аудио. «Video + Audio» — это видео с аудиодорожкой,
+            # его сюда не пускаем.
+            if clip_type == "Audio":
+                collected.append(clip)
+        for sub in folder.GetSubFolderList() or []:
+            walk(sub)
+
+    walk(start)
+    collected.sort(key=lambda it: (it.GetName() or "").lower())
+    return collected
+
+
+# ============================================================
+# ПОМОГАТЕЛЬНОЕ
+# ============================================================
+
+def _ensure_audio_tracks(timeline, needed):
     current = timeline.GetTrackCount("audio")
     while current < needed:
         timeline.AddTrack("audio")
         current += 1
 
 
-def get_clip_frames(item) -> int:
-    """Возвращает длительность клипа в кадрах (int)."""
-    raw = item.GetClipProperty("Frames")
+def _get_clip_frames(item):
     try:
-        return int(raw)
+        return int(item.GetClipProperty("Frames"))
     except (TypeError, ValueError):
         return 0
 
 
-def order_items_by_filename(imported_items, ordered_paths):
-    """
-    ImportMedia не гарантирует порядок элементов. Сопоставляем их с исходными
-    путями по имени файла, чтобы раскладывать в том же порядке, в котором
-    файлы лежат в final/.
-    """
-    by_name = {item.GetName(): item for item in imported_items}
-    ordered = []
-    for path in ordered_paths:
-        name = os.path.basename(path)
-        if name in by_name:
-            ordered.append(by_name[name])
-        else:
-            print(f"[!] В Media Pool не найден клип: {name}")
-    return ordered
-
-
 # ============================================================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНОЕ
 # ============================================================
 
-def main():
-    # --- 1. Путь до final/ рядом со скриптом ---
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    final_dir = os.path.join(script_dir, FINAL_FOLDER_NAME)
+def build_timeline():
+    # --- 1. Подключение ---
+    r = _get_resolve()
+    if not r:
+        return
 
-    if not os.path.isdir(final_dir):
-        sys.exit(f"[!] Не найдена папка: {final_dir}")
-
-    audio_files = collect_audio_files(final_dir)
-    if not audio_files:
-        sys.exit(f"[!] В папке {final_dir} нет поддерживаемых аудиофайлов.")
-    print(f"Найдено {len(audio_files)} аудиофайл(ов) в {final_dir}.")
-
-    # --- 2. Подключение к Resolve, проекту, Media Pool, Media Storage ---
-    resolve = get_resolve()
-    project_manager = resolve.GetProjectManager()
-    project = project_manager.GetCurrentProject()
+    project = r.GetProjectManager().GetCurrentProject()
     if not project:
-        sys.exit("[!] Нет открытого проекта. Создайте/откройте проект в Resolve.")
+        print("[!] Нет открытого проекта. Откройте проект в Resolve.")
+        return
 
-    media_pool    = project.GetMediaPool()
-    media_storage = resolve.GetMediaStorage()  # зарезервировано под расширение
+    media_pool = project.GetMediaPool()
+
+    # --- 2. Забираем аудио из Media Pool ---
+    audio_items = _collect_audio_clips(media_pool, SOURCE_BIN_NAME)
+    if not audio_items:
+        where = f"в бине «{SOURCE_BIN_NAME}»" if SOURCE_BIN_NAME else "в Media Pool"
+        print(f"[!] Не найдено ни одного аудио-клипа {where}.")
+        print("    Импортируйте файлы в Media Pool перед запуском скрипта.")
+        return
 
     print(f"Проект: {project.GetName()}")
+    print(f"Найдено {len(audio_items)} аудио-клип(ов) в медиатеке.")
 
-    # --- 3. Импорт аудио в Media Pool ---
-    imported = media_pool.ImportMedia(audio_files)
-    if not imported:
-        sys.exit("[!] Импорт не удался. Проверьте доступ к файлам и их формат.")
-    print(f"Импортировано в Media Pool: {len(imported)} клип(ов).")
-
-    # Восстанавливаем порядок по имени файла (важно для back-to-back раскладки).
-    ordered_items = order_items_by_filename(imported, audio_files)
-    if not ordered_items:
-        sys.exit("[!] После импорта не удалось сопоставить ни один клип.")
-
-    # --- 4. Создание пустого таймлайна ---
+    # --- 3. Пустой таймлайн ---
     timeline = media_pool.CreateEmptyTimeline(TIMELINE_NAME)
     if not timeline:
-        sys.exit(f"[!] Не удалось создать таймлайн «{TIMELINE_NAME}».")
+        print(f"[!] Не удалось создать таймлайн «{TIMELINE_NAME}».")
+        return
     print(f"Создан таймлайн: {timeline.GetName()}")
 
-    # --- 5. Раскладка: префикс → дорожка, клипы встык ---
-    prefix_to_track = {}   # { "Blueberry": 1, "Hawk": 2, ... }
+    # --- 4. Раскладка: префикс → дорожка, клипы встык ---
+    prefix_to_track = {}
     next_track_idx = 1
     current_record_frame = 0
     clip_infos = []
 
-    for item in ordered_items:
-        name   = item.GetName()
+    for item in audio_items:
+        name   = item.GetName() or ""
         prefix = extract_prefix(name)
-        frames = get_clip_frames(item)
+        frames = _get_clip_frames(item)
 
         if frames <= 0:
             print(f"  [!] Нулевая длительность у {name} — пропускаем.")
             continue
 
-        # Назначение дорожки
         if prefix not in prefix_to_track:
             prefix_to_track[prefix] = next_track_idx
-            # У пустого таймлайна обычно уже есть A1 — добавим только недостающие.
-            ensure_audio_tracks(timeline, next_track_idx)
+            _ensure_audio_tracks(timeline, next_track_idx)
             next_track_idx += 1
         track_index = prefix_to_track[prefix]
 
-        # Клип уходит «лесенкой» по времени: recordFrame = предыдущий end.
-        clip_info = {
+        clip_infos.append({
             "mediaPoolItem": item,
-            "startFrame":    0,          # весь клип от начала
-            "endFrame":      frames,     # до конца (в кадрах исходника)
+            "startFrame":    0,
+            "endFrame":      frames,
             "mediaType":     2,          # 1 = video, 2 = audio
             "trackIndex":    track_index,
             "recordFrame":   current_record_frame,
-        }
-        clip_infos.append(clip_info)
+        })
 
         print(
-            f"  [{prefix:>12}]  track A{track_index}  "
+            f"  [{prefix:>12}]  A{track_index}  "
             f"@ {current_record_frame} → {current_record_frame + frames}  "
             f"({frames} frames)  {name}"
         )
-
         current_record_frame += frames
 
     if not clip_infos:
-        sys.exit("[!] Нет клипов для размещения.")
+        print("[!] Нет клипов для размещения.")
+        return
 
-    # --- 6. Батч-добавление на таймлайн ---
-    # ВАЖНО: в официальном API Blackmagic метод живёт на MediaPool, а не Timeline.
-    # Если запустить timeline.AppendToTimeline(...) — будет AttributeError.
+    # --- 5. Батч-добавление на таймлайн ---
+    # В официальном API метод живёт на MediaPool, не на Timeline.
     result = media_pool.AppendToTimeline(clip_infos)
     if not result:
-        sys.exit(
-            "[!] AppendToTimeline вернул пустой результат.\n"
-            "    Проверьте вывод консоли Resolve (Workspace → Console)."
-        )
+        print("[!] AppendToTimeline вернул пустой результат.")
+        print("    Проверьте вывод в консоли Resolve (Workspace → Console).")
+        return
 
     print(
         f"\n✅ Готово: размещено {len(clip_infos)} клип(ов) "
         f"на {len(prefix_to_track)} дорожк(ах)."
     )
     print(f"   Префикс → дорожка: {prefix_to_track}")
+    return timeline
 
 
-if __name__ == "__main__":
-    main()
+# Вызываем «на лету» — удобно и для вставки в Py3-консоль, и для обычного запуска.
+build_timeline()
