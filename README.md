@@ -1,77 +1,78 @@
-# Audio Script Cutter
+# Нарезка аудио по сценарию
 
-A Python pipeline for taking a master screenplay + per-actor voice recordings and producing line-by-line audio cuts, organized by actor.
+Python-конвейер: берёт общий сценарий + записи актёров и получает нарезку по репликам, разложенную по папкам и готовую к сборке таймлайна.
 
-The pipeline runs OpenAI Whisper on each actor's recording, aligns the recognized words against that actor's script, and cuts the audio into one `.mp3` per script line.
+Для каждого актёра запускается OpenAI Whisper, распознанные слова сопоставляются с его текстом, после чего аудио режется на отдельные `.mp3` — по одному на строку сценария.
 
 ---
 
-## Prerequisites
+## Требования
 
 - **Python 3.9+**
-- **ffmpeg** available on `PATH` (used for lossless audio slicing)
-- **Python packages** (install into `.venv/`):
+- **ffmpeg** доступен в `PATH` (используется для нарезки без потери качества)
+- **Python-пакеты** (ставим в `.venv/`):
   ```
   pip install openai-whisper thefuzz python-Levenshtein
   ```
-- ~1 GB of free disk space for the Whisper `base` model on first run (larger if you switch to `small`/`medium`/`large`).
+- ~1 ГБ свободного места на диске для модели Whisper `base` при первом запуске (больше, если переключитесь на `small`/`medium`/`large`).
 
 ---
 
-## Expected folder layout
+## Ожидаемая структура папок
 
-Put everything under the project root:
+Всё складываем в корень проекта:
 
 ```
 script/
-├── script.py                  ← run this
+├── script.py                  ← запускаем этот файл
 ├── main.py
 ├── split_by_actors.py
 ├── distribute_cuts.py
+├── order_cuts.py
 │
-├── screenplay.txt             ← your master script (any name)
+├── screenplay.txt             ← ваш общий сценарий (имя любое)
 │
 ├── Blueberry/
-│   └── Blueberry.mp3          ← that actor's recording
+│   └── Blueberry.mp3          ← запись голоса актёра
 ├── Hawk/
 │   └── Hawk.mp3
 ├── Mia/
 │   └── Mia.mp3
-└── ... one folder per actor
+└── ... по одной папке на актёра
 ```
 
-**Rules:**
-- One master `.txt` screenplay in the root. Format: `Character: dialogue` per line. Scene headers, stage directions starting with `*(`, `*{`, `(`, `[` are ignored.
-- One folder per actor, named exactly as the character appears in the screenplay (case-insensitive match is tolerated).
-- Each actor folder must contain at least one `.mp3` recording. The `.txt` will be generated for you.
+**Правила:**
+- Один `.txt`-сценарий в корне. Формат: `Персонаж: реплика` на строке. Заголовки сцен, ремарки начинающиеся с `*(`, `*{`, `(`, `[` — игнорируются.
+- По одной папке на актёра. Имя папки совпадает с именем персонажа в сценарии (регистр не критичен).
+- В каждой папке актёра — хотя бы один `.mp3` с записью. Файл `.txt` будет создан автоматически.
 
 ---
 
-## How to run
+## Как запустить
 
-From the project root:
+Из корня проекта:
 
 ```bash
 python script.py
 ```
 
-That single command runs the full three-stage pipeline in order:
+Одна команда запускает все четыре этапа по порядку:
 
-### Stage 1 — `split_by_actors.py`
-Reads the master screenplay, groups lines by character, and writes `<Actor>/<Actor>.txt` into each existing actor folder. Actors without a matching folder are reported but not created automatically.
+### Этап 1 — `split_by_actors.py`
+Читает общий сценарий, группирует реплики по персонажам и пишет `<Актёр>/<Актёр>.txt` в существующие папки актёров. Персонажи без папки упоминаются отдельно, папки не создаются автоматически.
 
-### Stage 2 — `main.py`
-For each actor folder:
-1. Loads Whisper (`base` model by default) and transcribes the `.mp3` with word-level timestamps.
-2. Walks through the lines in `<Actor>.txt` and locates each one in the audio using fuzzy word matching, retry strategies (expanded window + alternate anchor words) to handle Whisper mistakes.
-3. Slices the audio losslessly with `ffmpeg -c copy` and writes each line to `cut/<Actor>/<Actor>_NNN.mp3`.
-4. If a phrase can't be matched, a **fallback cut** is still saved (from the failure point to end of audio) so no material is lost.
+### Этап 2 — `main.py`
+Для каждой папки актёра:
+1. Загружает Whisper (по умолчанию модель `base`) и транскрибирует `.mp3` с пословными временными метками.
+2. Проходит по строкам `<Актёр>.txt` и ищет каждую фразу в аудио через нечёткое сравнение слов, с повторными попытками (расширение окна + альтернативные опорные слова), чтобы обработать ошибки Whisper.
+3. Режет аудио без потери качества через `ffmpeg -c copy` и пишет каждую реплику в `cut/<Актёр>/<Актёр>_NNN.mp3`.
+4. Если фразу не удаётся сопоставить — сохраняет **fallback-нарезку** (от точки ошибки до конца аудио), чтобы материал не пропал.
 
-### Stage 3 — `distribute_cuts.py`
-Moves each `cut/<Actor>/` folder's contents into `<Actor>/cut/`, then cleans up the empty top-level `cut/` tree. Existing files are never overwritten — collisions are reported.
+### Этап 3 — `distribute_cuts.py`
+Переносит содержимое каждой `cut/<Актёр>/` в `<Актёр>/cut/`, затем чистит пустую `cut/` наверху. Существующие файлы никогда не перезаписываются — о конфликтах сообщается в отчёте.
 
-### Stage 4 — `order_cuts.py`
-Re-reads the master screenplay line by line and, for each dialogue line, locates the matching cut in `<Actor>/cut/` (by counting how many times that actor has spoken so far). Copies every cut into a single flat `final/` folder, renamed with a global index prefix so files sort in screenplay playback order:
+### Этап 4 — `order_cuts.py`
+Заново читает общий сценарий строка за строкой и для каждой реплики находит нужную нарезку в `<Актёр>/cut/` (по тому, сколько раз актёр уже говорил к этому моменту). Копирует все нарезки в единую плоскую папку `final/` с глобальным индексом-префиксом — так файлы сортируются в порядке воспроизведения по сценарию:
 
 ```
 final/
@@ -82,17 +83,17 @@ final/
 └── ...
 ```
 
-The leading `001`, `002`, `003` = position in the master screenplay. The trailing `_001`, `_002` = that actor's Nth line (traceable back to `<Actor>/cut/<Actor>_NNN.mp3`).
+Ведущие `001`, `002`, `003` — порядковый номер реплики в общем сценарии. Хвостовые `_001`, `_002` — какая это по счёту реплика у актёра (по ним легко найти источник в `<Актёр>/cut/<Актёр>_NNN.mp3`).
 
-### Final layout
+### Итоговая структура
 
 ```
 script/
 ├── screenplay.txt
 ├── Blueberry/
-│   ├── Blueberry.mp3       (original recording)
-│   ├── Blueberry.txt       (generated by stage 1)
-│   └── cut/                (cuts from stages 2 + 3)
+│   ├── Blueberry.mp3       (исходная запись)
+│   ├── Blueberry.txt       (создан этапом 1)
+│   └── cut/                (нарезки — этапы 2 и 3)
 │       ├── Blueberry_001.mp3
 │       ├── Blueberry_002.mp3
 │       └── ...
@@ -102,7 +103,7 @@ script/
 │   └── cut/
 │       └── ...
 ├── ...
-└── final/                  (stage 4 — all cuts ordered by master screenplay)
+└── final/                  (этап 4 — все нарезки по порядку сценария)
     ├── 001_Blueberry_001.mp3
     ├── 002_Hawk_001.mp3
     ├── 003_Blueberry_002.mp3
@@ -111,62 +112,69 @@ script/
 
 ---
 
-## File reference
+## Справочник файлов
 
-| File | Role |
+| Файл | Роль |
 |------|------|
-| `script.py` | Entry point. Runs the three-stage pipeline. |
-| `split_by_actors.py` | Stage 1 — splits master screenplay into per-actor `.txt` files. |
-| `main.py` | Stage 2 — Whisper transcription + audio slicing per actor. |
-| `distribute_cuts.py` | Stage 3 — moves cuts into each actor's folder. |
-| `order_cuts.py` | Stage 4 — collects all cuts into `final/` in master-screenplay order. |
-| `split_text.py` | Auxiliary — older character-splitter that writes to `characters_lines/`. Not used by `script.py`. |
-| `assemble_scene.py` | Auxiliary — joins per-actor cuts back into a single scene audio based on a screenplay. Run standalone. |
+| `script.py` | Точка входа. Запускает весь конвейер из четырёх этапов. |
+| `split_by_actors.py` | Этап 1 — разбивает общий сценарий на `.txt`-файлы по актёрам. |
+| `main.py` | Этап 2 — Whisper + нарезка аудио по каждому актёру. |
+| `distribute_cuts.py` | Этап 3 — переносит нарезки в папку каждого актёра. |
+| `order_cuts.py` | Этап 4 — собирает все нарезки в `final/` в порядке общего сценария. |
+| `split_text.py` | Вспомогательный — старый разделитель по персонажам, пишет в `characters_lines/`. В `script.py` не участвует. |
+| `assemble_scene.py` | Вспомогательный — склеивает нарезки актёров в одно аудио по сценарию через ffmpeg. Запускать отдельно. |
 
 ---
 
-## Configuration (top of each file)
+## Настройки (верх каждого файла)
 
 ### `main.py`
-| Constant | Purpose |
+| Константа | Назначение |
 |---|---|
-| `whisper.load_model("base")` | Change to `"small"` / `"medium"` / `"large"` for higher accuracy at the cost of speed. |
-| `MICRO_GAP`, `PAD_END` | Silence padding around each cut (seconds). |
-| `SIMILARITY_THRESHOLD` | How loosely words may match (0–100). Lower = more tolerant of Whisper errors but more false positives. |
-| `SEARCH_WINDOW` | How many audio words ahead to scan for a phrase anchor. |
-| `RETRY_WINDOW_MULTIPLIER` | On miss, search window is expanded by this factor. |
-| `ANCHOR_DEPTH` | How many leading/trailing words to try as alternate anchors if the first fails. |
+| `whisper.load_model("base")` | Смените на `"small"` / `"medium"` / `"large"` ради точности ценой скорости. |
+| `MICRO_GAP`, `PAD_END` | Тишина до/после каждой нарезки (в секундах). |
+| `SIMILARITY_THRESHOLD` | Насколько нестрого сравнивать слова (0–100). Ниже = больше терпимости к ошибкам Whisper, но возможны ложные совпадения. |
+| `SEARCH_WINDOW` | Сколько слов вперёд искать начало/конец фразы. |
+| `RETRY_WINDOW_MULTIPLIER` | Во сколько раз расширить окно при неудаче первой попытки. |
+| `ANCHOR_DEPTH` | Сколько крайних слов пробовать как опорные, если первое не найдено. |
 
 ### `distribute_cuts.py`
-| Constant | Purpose |
+| Константа | Назначение |
 |---|---|
-| `MOVE_FILES` | `True` = move (default), `False` = copy and preserve the top-level `cut/` as backup. |
-| `CLEANUP_EMPTY_DIRS` | `True` removes empty `cut/<actor>/` and `cut/` after moving. |
+| `MOVE_FILES` | `True` — перемещать (по умолчанию), `False` — копировать (верхнеуровневая `cut/` останется как резерв). |
+| `CLEANUP_EMPTY_DIRS` | `True` удаляет пустые `cut/<актёр>/` и саму `cut/` после перемещения. |
 
 ### `split_by_actors.py`
-| Constant | Purpose |
+| Константа | Назначение |
 |---|---|
-| `OVERWRITE` | `True` regenerates `<Actor>.txt` each run. Flip to `False` to preserve manual edits. |
-| `STAGE_PREFIXES` | Line prefixes that mark stage directions / non-dialogue lines to skip. |
+| `OVERWRITE` | `True` перезаписывает `<Актёр>.txt` при каждом запуске. Поставьте `False`, чтобы сохранить ручные правки. |
+| `STAGE_PREFIXES` | Префиксы строк, которые считаем ремарками и пропускаем. |
+
+### `order_cuts.py`
+| Константа | Назначение |
+|---|---|
+| `OUTPUT_DIR_NAME` | Имя итоговой папки. По умолчанию `"final"`. |
+| `COPY_FILES` | `True` — копировать (исходные `cut/` остаются целы), `False` — перемещать. |
+| `OVERWRITE` | `True` — безопасный повторный запуск с перезаписью. |
 
 ---
 
-## Troubleshooting
+## Возможные проблемы
 
-**"Не найдено .txt-файла сценария в корне"**
-Put your master screenplay (any `.txt` name) directly in the project root, next to `script.py`.
+**«Не найдено .txt-файла сценария в корне»**
+Положите общий сценарий (имя любое, расширение `.txt`) прямо в корень проекта рядом со `script.py`.
 
-**"Для N персонаж(ей) не найдено папки"**
-The screenplay mentions an actor that has no folder. Either create the folder (with their `.mp3`) or remove the character's lines from the screenplay.
+**«Для N персонаж(ей) не найдено папки»**
+В сценарии упомянут актёр, для которого нет папки. Либо создайте папку (с его `.mp3`), либо уберите его реплики из сценария.
 
-**Many phrases fail to match (`[x] Фраза NNN`)**
-- Try a larger Whisper model: edit `main.py` line 8, change `"base"` → `"small"` or `"medium"`.
-- Raise `RETRY_WINDOW_MULTIPLIER` and/or `ANCHOR_DEPTH` for longer recordings.
-- Lower `SIMILARITY_THRESHOLD` (e.g. to 55) if the actor's pronunciation differs heavily from the written script.
-- Failed phrases still produce fallback cuts — check those in `<Actor>/cut/` for manual review.
+**Много фраз не находятся (`[x] Фраза NNN`)**
+- Возьмите модель Whisper больше: в `main.py`, строка 8, меняем `"base"` на `"small"` или `"medium"`.
+- Поднимите `RETRY_WINDOW_MULTIPLIER` и/или `ANCHOR_DEPTH` — полезно для длинных записей.
+- Понизьте `SIMILARITY_THRESHOLD` (например, до 55), если произношение актёра сильно отличается от текста.
+- Для неудачных фраз всё равно создаётся fallback-нарезка — посмотрите их в `<Актёр>/cut/` и решите, что делать, вручную.
 
-**"ffmpeg: command not found"**
-Install ffmpeg: `brew install ffmpeg` on macOS, `apt install ffmpeg` on Debian/Ubuntu.
+**«ffmpeg: command not found»**
+Поставьте ffmpeg: macOS — `brew install ffmpeg`, Debian/Ubuntu — `apt install ffmpeg`.
 
-**"в имени файла нет номера" / files stuck in top-level `cut/`**
-Something wrote a cut file with a non-standard name. Check `main.py` produced `<Actor>_NNN.mp3` — the `NNN` suffix is what `distribute_cuts.py` keys on when deciding where a file goes (for the older per-line distribution mode; the current per-actor flow doesn't need it but preserves the naming).
+**«в имени файла нет номера» / файлы застряли в верхнеуровневой `cut/`**
+Кто-то записал нарезку с нестандартным именем. Проверьте, что `main.py` создаёт файлы вида `<Актёр>_NNN.mp3` — суффикс `NNN` критичен для распределения (для старого режима распределения по строкам; текущий режим «папка на актёра» на него не опирается, но схему именования сохраняет).

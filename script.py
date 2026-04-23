@@ -8,4 +8,3 @@ if __name__ == '__main__':
     split_by_actors()
     drop_files()
     distribute_cuts()
-    order_cuts()
