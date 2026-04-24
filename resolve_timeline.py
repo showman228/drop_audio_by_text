@@ -76,12 +76,7 @@ def _find_bin(folder, name):
 
 
 def _collect_audio_clips(media_pool, bin_name=""):
-    """
-    Собирает все чисто-аудио-клипы из Media Pool.
-    Если bin_name задан — только из этой папки и её подпапок; иначе — из всей медиатеки.
-    Результат отсортирован по имени (что совпадает со сценарной последовательностью
-    для файлов вида 001_<Actor>_NNN.mp3).
-    """
+ 
     root = media_pool.GetRootFolder()
     if not root:
         print("[!] Media Pool пуст — нет корневой папки.")
